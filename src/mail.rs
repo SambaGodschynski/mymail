@@ -24,22 +24,32 @@ struct Message {
     unread: bool,
 }
 
-pub async fn run(config: &Config, window: TimeDelta, opts: &Opts) -> Result<(), Error> {
+pub async fn run(
+    config: &Config,
+    window: TimeDelta,
+    before: Option<DateTime<Utc>>,
+    opts: &Opts,
+) -> Result<(), Error> {
     let session = Session::new(&api::client(), config.token.clone());
-    let mut since = Utc::now() - window;
+    let until = before.unwrap_or_else(Utc::now);
+    let mut since = until - window;
     let mut seen: HashSet<String> = HashSet::new();
 
     if opts.verbose {
-        eprintln!("loading {} since {}", config.folder, stamp(since));
+        eprintln!("loading {} from {} to {}", config.folder, stamp(since), stamp(until));
     }
-    let backfilled = print_new(&session, config, &mut since, &mut seen, opts)
+    let backfilled = print_new(&session, config, &mut since, before, &mut seen, opts)
         .await
         .map_err(|e| crate::config::explain(e, &config.token, "Mail.Read"))?;
     if opts.verbose || backfilled == 0 {
-        eprintln!("{backfilled} message(s) in the last {}", describe(window));
+        eprintln!("{backfilled} message(s) in the {} before {}", describe(window), stamp(until));
     }
 
-    if opts.once {
+    // A named window has an end, so there is nothing to wait for: following
+    // would sit there watching a stretch of the past that cannot change. Same
+    // reason myslackcli exits after a --before run, and what makes chunks
+    // chainable in a script.
+    if opts.once || before.is_some() {
         return Ok(());
     }
 
@@ -61,7 +71,7 @@ pub async fn run(config: &Config, window: TimeDelta, opts: &Opts) -> Result<(), 
         // One failed poll shouldn't end a session that's been running for
         // hours — but an expired token will fail every time from now on, so
         // that one stops.
-        match print_new(&session, config, &mut since, &mut seen, opts).await {
+        match print_new(&session, config, &mut since, None, &mut seen, opts).await {
             Ok(_) => {}
             Err(e) if e.to_string().contains("expired") => return Err(e),
             Err(e) => eprintln!("poll failed ({e}) — trying again in {}", describe_std(config.poll)),
@@ -76,10 +86,11 @@ async fn print_new(
     session: &Session,
     config: &Config,
     since: &mut DateTime<Utc>,
+    until: Option<DateTime<Utc>>,
     seen: &mut HashSet<String>,
     opts: &Opts,
 ) -> Result<usize, Error> {
-    let url = messages_url(&config.folder, *since);
+    let url = messages_url(&config.folder, *since, until);
     let values = session.get_all(&url, opts.verbose).await?;
 
     let mut printed = 0;
@@ -96,6 +107,26 @@ async fn print_new(
         }
         print_message(&message, opts.ids);
         printed += 1;
+
+        // The listing carries no body, so each mirrored message is one more
+        // request — which is why this only happens when a mirror was asked for.
+        if let Some(archive) = &opts.mirror {
+            match crate::message::render(session, &message.id, opts).await {
+                Ok(rendered) => {
+                    let file = archive.write(
+                        rendered.received,
+                        &message.id,
+                        &rendered.subject,
+                        &rendered.document,
+                    )?;
+                    if opts.verbose {
+                        eprintln!("mirrored {}", file.display());
+                    }
+                }
+                // One unreadable message is no reason to abandon a long window.
+                Err(e) => eprintln!("could not mirror {}: {e}", message.id),
+            }
+        }
     }
 
     // Bounded rather than pruned precisely: which ids are dropped doesn't
@@ -107,14 +138,19 @@ async fn print_new(
     Ok(printed)
 }
 
-fn messages_url(folder: &str, since: DateTime<Utc>) -> String {
+fn messages_url(folder: &str, since: DateTime<Utc>, until: Option<DateTime<Utc>>) -> String {
     // "allmail" means every folder, which is what /me/messages is; anything
     // else names a folder, and Graph knows the well-known ones by name.
     let path = match folder {
         "allmail" | "all" => "/me/messages".to_string(),
         named => format!("/me/mailFolders/{}/messages", api::encode(named)),
     };
-    let filter = format!("receivedDateTime ge {}", stamp(since));
+    // `lt` on the upper edge, so a window named by its end day excludes that
+    // day: one chunk's start can be the next chunk's --before with no overlap.
+    let filter = match until {
+        Some(until) => format!("receivedDateTime ge {} and receivedDateTime lt {}", stamp(since), stamp(until)),
+        None => format!("receivedDateTime ge {}", stamp(since)),
+    };
     format!(
         "https://graph.microsoft.com/v1.0{path}?$select={SELECT}&$filter={}&$orderby=receivedDateTime%20asc&$top={PAGE}",
         api::encode(&filter)
@@ -204,7 +240,7 @@ mod tests {
 
     #[test]
     fn the_url_names_the_folder_and_filters_by_arrival() {
-        let url = messages_url("inbox", at("2026-09-22T00:00:00Z"));
+        let url = messages_url("inbox", at("2026-09-22T00:00:00Z"), None);
         assert!(url.starts_with("https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?"), "got: {url}");
         assert!(url.contains("receivedDateTime%20ge%202026-09-22T00%3A00%3A00Z"), "got: {url}");
         assert!(url.contains("$orderby=receivedDateTime%20asc"), "got: {url}");
@@ -213,16 +249,25 @@ mod tests {
     // Every folder, which is a different endpoint rather than a different filter.
     #[test]
     fn allmail_watches_every_folder() {
-        let url = messages_url("allmail", at("2026-09-22T00:00:00Z"));
+        let url = messages_url("allmail", at("2026-09-22T00:00:00Z"), None);
         assert!(url.starts_with("https://graph.microsoft.com/v1.0/me/messages?"), "got: {url}");
     }
 
     // A folder name is the one part of the URL that comes from configuration.
     #[test]
     fn a_folder_name_cannot_carry_anything_into_the_query() {
-        let url = messages_url("../../me/messages?$top=1&x", at("2026-09-22T00:00:00Z"));
+        let url = messages_url("../../me/messages?$top=1&x", at("2026-09-22T00:00:00Z"), None);
         assert!(!url.contains("../.."), "got: {url}");
         assert_eq!(url.matches('?').count(), 1, "only the query may start a query: {url}");
+    }
+
+    // A named end makes the window closed at both sides, which is what lets
+    // chunks be chained without overlapping.
+    #[test]
+    fn a_named_end_closes_the_window_at_the_top() {
+        let url = messages_url("inbox", at("2026-09-22T00:00:00Z"), Some(at("2026-09-29T00:00:00Z")));
+        assert!(url.contains("receivedDateTime%20ge%202026-09-22T00%3A00%3A00Z"), "got: {url}");
+        assert!(url.contains("and%20receivedDateTime%20lt%202026-09-29T00%3A00%3A00Z"), "got: {url}");
     }
 
     #[test]

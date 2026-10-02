@@ -189,16 +189,25 @@ numbers.
 ```bash
 X_MAIL_BIN=/path/to/mymail/target/release/mymail   # or leave it on PATH
 . /path/to/mymail/fzf_example.sh
-x_mail 7          # the last 7 days, then live — enter reads one in nvim
+x_mail 7          # the last 7 days, then live — enter reads one in nvim,
+                  # ctrl-r reloads the list
 x_mail_once 7     # the same without waiting for more
 x_mail_events 7   # the next 7 days in the calendar
 x_mail_open <id>  # straight to one message
 ```
 
-Sourced rather than run, works in bash and zsh, needs `fzf` and `nvim`.
+Sourced rather than run, works in bash and zsh, needs `fzf` and `nvim`. Both
+ways in — the picker's enter and `x_mail_open` — pass `--mirror`, so reading a
+message archives it. Their stderr goes to a file of its own and is folded into
+what nvim shows only when the render failed, so the "mirrored …" line doesn't
+become the first line of every mail.
 
 `x_mail` streams into fzf and keeps streaming, so new mail appears in the list
-as it arrives. Enter uses fzf's `execute`, which hands the terminal to nvim and
+as it arrives. The list comes from `FZF_DEFAULT_COMMAND` rather than a pipe, so
+`ctrl-r` can run the very same command again — one definition for both, and no
+way for a reload to show something other than what was first displayed. fzf ends
+the old command before starting the next, so a reload replaces the stream rather
+than leaving a second one polling alongside it. Enter uses fzf's `execute`, which hands the terminal to nvim and
 takes it back — `become` would replace fzf and end the session on the first
 message, and `execute-silent` would leave nvim without a terminal. The message
 is rendered into a temporary file with stderr folded in, so a refusal is read in

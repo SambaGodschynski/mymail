@@ -17,17 +17,61 @@ pub async fn show(config: &Config, id: &str, opts: &Opts) -> Result<(), Error> {
         return Err("show-message needs a message id — `mymail 7 --ids` prints them".into());
     }
     let session = Session::new(&api::client(), config.token.clone());
+    let message = fetch(&session, id, opts)
+        .await
+        .map_err(|e| crate::config::explain(e, &config.token, "Mail.Read"))?;
+
+    if let Some(archive) = &opts.mirror {
+        let file = archive.write(received_at(&message), id, subject(&message), &document(&message, false)?)?;
+        eprintln!("mirrored {}", file.display());
+    }
+    outln!("{}", document(&message, crate::color_enabled())?);
+    Ok(())
+}
+
+async fn fetch(session: &Session, id: &str, opts: &Opts) -> Result<Value, Error> {
     let url = message_url(id);
     if opts.verbose {
         eprintln!("GET {url}");
     }
-    let message = session
-        .get(&url)
-        .await
-        .map_err(|e| crate::config::explain(e, &config.token, "Mail.Read"))?;
+    session.get(&url).await
+}
 
-    outln!("{}", document(&message, crate::color_enabled())?);
-    Ok(())
+// One message, fetched and rendered plain, for the listing to archive. The same
+// two steps `show` takes, so the file is the same either way.
+pub struct Rendered {
+    pub received: DateTime<Local>,
+    pub subject: String,
+    pub document: String,
+}
+
+pub async fn render(session: &Session, id: &str, opts: &Opts) -> Result<Rendered, Error> {
+    let message = fetch(session, id, opts).await?;
+    Ok(Rendered {
+        received: received_at(&message),
+        subject: subject(&message).to_string(),
+        document: document(&message, false)?,
+    })
+}
+
+fn subject(message: &Value) -> &str {
+    message
+        .get("subject")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(no subject)")
+}
+
+// Falls back to now rather than refusing: a message with no timestamp still has
+// to land somewhere, and today is the least surprising place.
+fn received_at(message: &Value) -> DateTime<Local> {
+    message
+        .get("receivedDateTime")
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|at| at.with_timezone(&Local))
+        .unwrap_or_else(Local::now)
 }
 
 fn message_url(id: &str) -> String {
@@ -38,11 +82,7 @@ fn message_url(id: &str) -> String {
 
 fn document(message: &Value, colour: bool) -> Result<String, Error> {
     let paint = |code: &'static str| if colour { code } else { "" };
-    let subject = message
-        .get("subject")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("(no subject)");
+    let subject = subject(message);
 
     let bar = "-".repeat(WIDTH);
     let mut out = String::new();

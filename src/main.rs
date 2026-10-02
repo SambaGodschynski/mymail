@@ -17,6 +17,7 @@ macro_rules! outln {
 }
 
 mod api;
+mod archive;
 mod config;
 mod events;
 mod mail;
@@ -25,12 +26,13 @@ mod message;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use chrono::TimeDelta;
+use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
 
 const USAGE: &str = "\
 usage: mymail <days> [options]
        mymail show-events <days> [options]
        mymail show-message <id> [options]
+       mymail --oldest --mirror <dir>
 
   <days>                  how far back to load before following (e.g. 7), or
                           for show-events, how far ahead to look. A suffixed
@@ -40,6 +42,13 @@ options:
       --once              print what was loaded and exit instead of following
       --ids               put each message's id first, for show-message to take
                           (hidden from a picker with fzf --with-nth=2..)
+      --mirror <dir>      also write every message read to
+                          <dir>/YYYY/MM/DD/<time>-<id>-<subject>.md. Write-only;
+                          a message costs two more calls, so this is opt-in.
+      --before <date>     end the window at this date (YYYY-MM-DD, local
+                          midnight, exclusive) instead of at now, then exit —
+                          for fetching older stretches without re-reading
+      --oldest            say how far back the mirror reaches, and exit
       --poll <duration>   how often to check for new mail, overriding
                           POLL_INTERVAL in the config (e.g. 30s, 2m)
       --folder <name>     which folder to follow, overriding MAIL_FOLDER
@@ -73,6 +82,8 @@ pub struct Opts {
     pub verbose: bool,
     pub once: bool,
     pub ids: bool,
+    // Where to keep what was read, if anywhere.
+    pub mirror: Option<archive::Archive>,
 }
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -96,6 +107,9 @@ async fn run() -> Result<(), Error> {
     let mut env_path: Option<String> = None;
     let mut poll: Option<String> = None;
     let mut folder: Option<String> = None;
+    let mut mirror_root: Option<String> = None;
+    let mut before: Option<String> = None;
+    let mut oldest = false;
     let mut words: Vec<String> = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -111,6 +125,15 @@ async fn run() -> Result<(), Error> {
             other if other.starts_with("--folder=") => {
                 folder = Some(other.trim_start_matches("--folder=").to_string())
             }
+            "--mirror" => mirror_root = Some(args.next().ok_or("missing directory for --mirror (e.g. --mirror=~/mail)")?),
+            other if other.starts_with("--mirror=") => {
+                mirror_root = Some(other.trim_start_matches("--mirror=").to_string())
+            }
+            "--before" => before = Some(args.next().ok_or("missing date for --before (e.g. --before=2026-01-01)")?),
+            other if other.starts_with("--before=") => {
+                before = Some(other.trim_start_matches("--before=").to_string())
+            }
+            "--oldest" => oldest = true,
             "--env" => env_path = Some(args.next().ok_or("missing value for --env (e.g. --env=/path/.env)")?),
             other if other.starts_with("--env=") => env_path = Some(other.trim_start_matches("--env=").to_string()),
             "-h" | "--help" => {
@@ -128,6 +151,21 @@ async fn run() -> Result<(), Error> {
         }
     }
     COLOR_ENABLED.set(!no_color).ok();
+
+    let mirror = mirror_root.as_deref().map(archive::Archive::new);
+
+    // Reads the archive and stops: no window to name, and no reason to ask
+    // Microsoft anything.
+    if oldest {
+        let archive = mirror.as_ref().ok_or("--oldest reads the mirror, so it needs --mirror=<dir>")?;
+        return match archive.oldest()? {
+            Some(path) => {
+                outln!("{}", path.display());
+                Ok(())
+            }
+            None => Err("nothing mirrored yet".into()),
+        };
+    }
 
     if words.is_empty() {
         print!("{USAGE}");
@@ -154,7 +192,11 @@ async fn run() -> Result<(), Error> {
         config.folder = name.trim().to_lowercase();
     }
 
-    let opts = Opts { verbose, once, ids };
+    let before = match &before {
+        Some(text) => Some(parse_date(text).ok_or_else(|| format!("--before={text} is not a date — try 2026-01-01"))?),
+        None => None,
+    };
+    let opts = Opts { verbose, once, ids, mirror };
     match command {
         "show-message" => {
             let id = argument.ok_or("show-message needs a message id — `mymail 7 --ids` prints them")?;
@@ -166,10 +208,20 @@ async fn run() -> Result<(), Error> {
                 .ok_or_else(|| format!("{argument:?} is not a number of days — try 7, or 2h"))?;
             match other {
                 "show-events" => events::run(&config, window, &opts).await,
-                _ => mail::run(&config, window, &opts).await,
+                _ => mail::run(&config, window, before, &opts).await,
             }
         }
     }
+}
+
+// Local midnight of the named day, which is the exclusive end of a window. The
+// same spelling as myslackcli's --before, and for the same reason: using one
+// chunk's oldest day as the next --before then neither overlaps nor leaves a
+// gap.
+fn parse_date(text: &str) -> Option<DateTime<Utc>> {
+    let date = chrono::NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d").ok()?;
+    let midnight = date.and_hms_opt(0, 0, 0)?;
+    Local.from_local_datetime(&midnight).single().map(|at| at.with_timezone(&Utc))
 }
 
 // A bare number is days, because that's what the argument is for. A suffixed
@@ -188,6 +240,20 @@ fn parse_window(text: &str) -> Option<TimeDelta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_date_becomes_local_midnight() {
+        let at = parse_date("2026-01-01").expect("a real date");
+        let local = at.with_timezone(&Local);
+        assert_eq!(local.format("%Y-%m-%d %H:%M:%S").to_string(), "2026-01-01 00:00:00");
+    }
+
+    #[test]
+    fn something_that_is_not_a_date_is_refused() {
+        for bad in ["", "2026", "01.01.2026", "2026-13-01", "gestern"] {
+            assert!(parse_date(bad).is_none(), "{bad:?} should be refused");
+        }
+    }
 
     #[test]
     fn a_bare_number_is_days() {
