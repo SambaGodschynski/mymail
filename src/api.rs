@@ -1,8 +1,19 @@
+use std::time::Duration;
+
 use serde_json::Value;
 
 use crate::Error;
 
 const MAX_RATE_LIMIT_WAITS: u32 = 5;
+// A request that gets no answer has to fail rather than wait for ever. Without
+// this a stalled connection — a sleeping laptop, a VPN that dropped, a proxy
+// that accepted and then went quiet — reads as the program having frozen, with
+// nothing on screen to say otherwise.
+const TIMEOUT: Duration = Duration::from_secs(30);
+// A stall is usually a blip, and a run of several hundred requests shouldn't
+// end because one of them met it.
+const STALL_RETRIES: u32 = 3;
+const STALL_BACKOFF: Duration = Duration::from_secs(5);
 const FALLBACK_RETRY_AFTER: u64 = 10;
 const MAX_RETRY_AFTER: u64 = 120;
 
@@ -12,6 +23,10 @@ const EXPIRED: &str = "the token was rejected — a browser token lasts about an
 probably expired. Copy a fresh one (see the README).";
 
 pub fn client() -> reqwest::Client {
+    client_with_timeout(TIMEOUT)
+}
+
+pub fn client_with_timeout(timeout: Duration) -> reqwest::Client {
     // Outlook returns calendar times in whatever zone it feels is right and
     // says which in a field beside them; asking for UTC once means every
     // timestamp that arrives can be read the same way. It does nothing to mail,
@@ -27,6 +42,7 @@ pub fn client() -> reqwest::Client {
     );
 
     reqwest::Client::builder()
+        .timeout(timeout)
         .default_headers(headers)
         // A redirect would be Microsoft sending us to a sign-in page, which is
         // not an answer and should not be followed and parsed as one.
@@ -38,24 +54,56 @@ pub fn client() -> reqwest::Client {
 pub struct Session {
     client: reqwest::Client,
     token: String,
+    stall_retries: u32,
+    stall_backoff: Duration,
 }
 
 impl Session {
     pub fn new(client: &reqwest::Client, token: String) -> Self {
-        Self { client: client.clone(), token }
+        Self {
+            client: client.clone(),
+            token,
+            stall_retries: STALL_RETRIES,
+            stall_backoff: STALL_BACKOFF,
+        }
+    }
+
+    // For tests, which cannot wait out the real backoff.
+    #[cfg(test)]
+    fn impatient(mut self, retries: u32, backoff: Duration) -> Self {
+        self.stall_retries = retries;
+        self.stall_backoff = backoff;
+        self
     }
 
     pub async fn get(&self, url: &str) -> Result<Value, Error> {
         let mut waits = 0u32;
+        let mut stalls = 0u32;
         loop {
-            let response = self
+            let sent = self
                 .client
                 .get(url)
                 .bearer_auth(&self.token)
                 .header(reqwest::header::ACCEPT, "application/json")
                 .send()
-                .await
-                .map_err(with_cause)?;
+                .await;
+
+            let response = match sent {
+                Ok(response) => response,
+                // Timed out, or never connected: nothing was answered, so
+                // asking again is safe — this is a GET either way.
+                Err(e) if (e.is_timeout() || e.is_connect()) && stalls < self.stall_retries => {
+                    stalls += 1;
+                    eprintln!(
+                        "no answer ({}) — trying again ({stalls}/{})",
+                        if e.is_timeout() { "timed out" } else { "could not connect" },
+                        self.stall_retries
+                    );
+                    tokio::time::sleep(self.stall_backoff).await;
+                    continue;
+                }
+                Err(e) => return Err(with_cause(e)),
+            };
 
             let status = response.status();
             let retry_after = response
@@ -221,6 +269,35 @@ mod tests {
 
         let request = rx.await.unwrap().to_lowercase();
         assert!(request.contains("authorization: bearer eyj-token"), "got:\n{request}");
+    }
+
+    // The failure this exists for: a server that accepts the connection and
+    // then says nothing. Without a timeout the program waits for ever and looks
+    // frozen; with one it gives up, says so, and tries again.
+    #[tokio::test]
+    async fn a_server_that_never_answers_times_out_and_is_retried() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = accepted.clone();
+        tokio::spawn(async move {
+            // Accept and hold, answering nothing.
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                held.push(sock);
+            }
+        });
+
+        let session = Session::new(&client_with_timeout(Duration::from_millis(200)), "t".to_string())
+            .impatient(2, Duration::from_millis(50));
+        let started = std::time::Instant::now();
+
+        let err = session.get(&format!("http://{addr}/")).await.expect_err("a silent server is a failure");
+
+        assert!(err.to_string().contains("error sending request"), "got: {err}");
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 3, "one try plus two retries");
+        assert!(started.elapsed() < Duration::from_secs(5), "it must not have waited for ever");
     }
 
     #[tokio::test]

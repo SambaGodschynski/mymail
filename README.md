@@ -236,6 +236,20 @@ Graph can also return the body as plain text
 but flattens links and structure away. `show-message` handles a text body if one
 arrives, and asks for HTML.
 
+## When a long run stops
+
+Every request has a 30-second timeout, and a request that times out or never
+connects is tried again up to three times before it gives up. This is the
+difference between a run that stops and says so and one that appears to have
+frozen: without a timeout a single stalled connection — a sleeping laptop, a VPN
+that dropped, a proxy that accepted and then went quiet — leaves the program
+waiting for ever with nothing on screen.
+
+Throttling is a different thing and was looked for rather than assumed: 525
+requests over 90 days of mail went through at about six a second with no
+`429` at all. If Graph does throttle, it says so with a `Retry-After` and that
+is waited out, reported as `Rate limited — waiting 10s (1/5)`.
+
 ## Tests
 
 ```bash
