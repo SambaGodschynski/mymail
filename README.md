@@ -65,6 +65,9 @@ mymail 7 --folder allmail # every folder, not just what arrived in the inbox
 mymail show-events 7      # appointments in the next 7 days
 mymail 7 --once --ids     # with each message's id in front
 mymail show-message <id>  # one message, body and all
+mymail 30 --mirror ~/mail # …and keep every one of them as Markdown
+mymail --oldest --mirror ~/mail        # how far back the archive reaches
+mymail 30 --before=2026-09-01 --mirror ~/mail   # an older stretch
 mymail --help             # all flags
 ```
 
@@ -114,6 +117,62 @@ renderer:
 
 ```bash
 mymail show-message <id> --no-color | glow -
+```
+
+### `--mirror <dir>`
+
+Writes every message read as Markdown, so it can be grepped, diffed or opened
+later without asking Microsoft again:
+
+```
+~/mail/inbox/2026/10/02/2026-10-02T1139-mcshfwaa-einladung-zur-coding-challenge.md
+~/mail/outbox/2026/10/02/2026-10-02T1510-zlezdaaa-re-coding-challenge.md
+```
+
+Received and sent are kept apart at the top. **Sent mail is mirrored but not
+printed** — this is a view of what is arriving, and one's own replies
+interleaved with it is not what either is for; the run says how many it filed.
+Which box a message goes in is asked of the message itself: a sent one carries
+the sent folder's id in `parentFolderId` and nothing else does, which gets a mail
+copied to oneself right where comparing the sender would not.
+
+Year, month and day are strictly nested, and the file name starts with the time
+— so the archive sorts itself and the oldest message is four directory reads
+away rather than a scan. There is no database: the layout *is* the index. A week
+level was considered and dropped, because an ISO week belongs to a year rather
+than to a month, and a week directory under October can hold a message from the
+28th of September — which would break exactly that property.
+
+The name also carries the **end** of the message id. Not the start: an immutable
+id is 68 characters of which the first 60 are identical for every message in a
+mailbox — measured over 92 of them, the leading characters distinguish nothing
+while the last six already tell all 92 apart. That makes the path a function of
+the message, so opening the same mail twice rewrites one file instead of making
+a second.
+
+**Write-only, and it never deletes.** The listing carries no body, so each
+mirrored message is one more request — which is why mirroring is opt-in rather
+than something the listing does anyway.
+
+### Reaching further back
+
+`--before <date>` ends the window at local midnight of that day instead of at
+now, and exits once it is loaded rather than following — so stretches of the
+past can be pulled in chunks, and chained in a script:
+
+```bash
+mymail 30 --before=2026-09-01 --mirror ~/mail   # August
+mymail 30 --before=2026-08-01 --mirror ~/mail   # July
+```
+
+The date is exclusive, so one chunk's start can be the next chunk's `--before`
+with neither an overlap nor a gap. `--oldest` says how far the archive already
+reaches — across both boxes, since they are pulled together — which is where the
+next chunk should end:
+
+```bash
+$ mymail --oldest --mirror ~/mail
+~/mail/inbox/2025/11/01/2025-11-01T1214-ruouxgaa-november-2025.md
 ```
 
 ### Identifying a message
@@ -195,6 +254,13 @@ x_mail_once 7     # the same without waiting for more
 x_mail_events 7   # the next 7 days in the calendar
 x_mail_open <id>  # straight to one message
 ```
+
+`x_mail_update_token <token>` puts a fresh token into the config, replacing
+whatever `MAIL_TOKEN` held and leaving the rest of the file alone. A `Bearer `
+prefix copied along with it is stripped, the replacement is one atomic rename so
+an interruption can't leave a config without a token, and the new token is tried
+once before the function returns — finding out now beats finding out in the
+middle of a sync.
 
 Sourced rather than run, works in bash and zsh, needs `fzf` and `nvim`. Both
 ways in — the picker's enter and `x_mail_open` — pass `--mirror`, so reading a

@@ -34,13 +34,29 @@ pub async fn run(
     let until = before.unwrap_or_else(Utc::now);
     let mut since = until - window;
     let mut seen: HashSet<String> = HashSet::new();
+    // Only needed to tell the two boxes apart, so only asked for when there is
+    // an archive to put them in.
+    let sent_folder = match &opts.mirror {
+        Some(_) => crate::message::sent_folder_id(&session, opts).await,
+        None => None,
+    };
+    // Sent mail is archived alongside what arrived, but not printed: this is a
+    // view of what is coming in, and one's own replies interleaved with it is
+    // not what either is for. It gets a cursor of its own because the two
+    // folders fill at different rates.
+    let mut sent_since = since;
+    let mut sent_seen: HashSet<String> = HashSet::new();
 
     if opts.verbose {
         eprintln!("loading {} from {} to {}", config.folder, stamp(since), stamp(until));
     }
-    let backfilled = print_new(&session, config, &mut since, before, &mut seen, opts)
+    let backfilled = print_new(&session, config, &mut since, before, &mut seen, sent_folder.as_deref(), opts)
         .await
         .map_err(|e| crate::config::explain(e, &config.token, "Mail.Read"))?;
+    let sent = mirror_sent(&session, &mut sent_since, before, &mut sent_seen, sent_folder.as_deref(), opts).await?;
+    if sent > 0 {
+        eprintln!("{sent} sent message(s) mirrored");
+    }
     if opts.verbose || backfilled == 0 {
         eprintln!("{backfilled} message(s) in the {} before {}", describe(window), stamp(until));
     }
@@ -71,8 +87,14 @@ pub async fn run(
         // One failed poll shouldn't end a session that's been running for
         // hours — but an expired token will fail every time from now on, so
         // that one stops.
-        match print_new(&session, config, &mut since, None, &mut seen, opts).await {
-            Ok(_) => {}
+        match print_new(&session, config, &mut since, None, &mut seen, sent_folder.as_deref(), opts).await {
+            Ok(_) => {
+                if let Err(e) =
+                    mirror_sent(&session, &mut sent_since, None, &mut sent_seen, sent_folder.as_deref(), opts).await
+                {
+                    eprintln!("could not mirror sent mail ({e})");
+                }
+            }
             Err(e) if e.to_string().contains("expired") => return Err(e),
             Err(e) => eprintln!("poll failed ({e}) — trying again in {}", describe_std(config.poll)),
         }
@@ -88,6 +110,7 @@ async fn print_new(
     since: &mut DateTime<Utc>,
     until: Option<DateTime<Utc>>,
     seen: &mut HashSet<String>,
+    sent_folder: Option<&str>,
     opts: &Opts,
 ) -> Result<usize, Error> {
     let url = messages_url(&config.folder, *since, until);
@@ -111,9 +134,10 @@ async fn print_new(
         // The listing carries no body, so each mirrored message is one more
         // request — which is why this only happens when a mirror was asked for.
         if let Some(archive) = &opts.mirror {
-            match crate::message::render(session, &message.id, opts).await {
+            match crate::message::render(session, &message.id, sent_folder, opts).await {
                 Ok(rendered) => {
                     let file = archive.write(
+                        rendered.which,
                         rendered.received,
                         &message.id,
                         &rendered.subject,
@@ -136,6 +160,46 @@ async fn print_new(
         seen.clear();
     }
     Ok(printed)
+}
+
+// The sent folder, archived but not shown. Its own cursor and its own seen-set,
+// so it can run at its own pace beside the folder being followed.
+async fn mirror_sent(
+    session: &Session,
+    since: &mut DateTime<Utc>,
+    until: Option<DateTime<Utc>>,
+    seen: &mut HashSet<String>,
+    sent_folder: Option<&str>,
+    opts: &Opts,
+) -> Result<usize, Error> {
+    let Some(archive) = &opts.mirror else { return Ok(0) };
+    let values = session.get_all(&messages_url("sentitems", *since, until), opts.verbose).await?;
+
+    let mut written = 0;
+    for value in &values {
+        let Some(message) = message_from(value) else { continue };
+        if !seen.insert(message.id.clone()) {
+            continue;
+        }
+        if message.received > *since {
+            *since = message.received;
+        }
+        match crate::message::render(session, &message.id, sent_folder, opts).await {
+            Ok(rendered) => {
+                let file =
+                    archive.write(rendered.which, rendered.received, &message.id, &rendered.subject, &rendered.document)?;
+                written += 1;
+                if opts.verbose {
+                    eprintln!("mirrored {}", file.display());
+                }
+            }
+            Err(e) => eprintln!("could not mirror {}: {e}", message.id),
+        }
+    }
+    if seen.len() > REMEMBER {
+        seen.clear();
+    }
+    Ok(written)
 }
 
 fn messages_url(folder: &str, since: DateTime<Utc>, until: Option<DateTime<Utc>>) -> String {

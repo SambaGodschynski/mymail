@@ -2,8 +2,13 @@
 //! without an index.
 //!
 //! ```text
-//! <root>/2026/10/02/2026-10-02T1422-AAkALgAA-rechnung-september.md
+//! <root>/inbox/2026/10/02/2026-10-02T1422-mcshfwaa-rechnung-september.md
+//! <root>/outbox/2026/10/02/2026-10-02T1510-zlfqtwaa-re-rechnung-september.md
 //! ```
+//!
+//! Received and sent are kept apart at the top, because reading a year of one's
+//! own replies interleaved with everything that arrived is not what either is
+//! for.
 //!
 //! Year, month and day are strictly nested, which is what makes `--oldest` four
 //! directory reads: the smallest year holds the smallest month holds the
@@ -28,6 +33,24 @@ use crate::Error;
 const ID_TAIL: usize = 8;
 const MAX_SLUG: usize = 60;
 
+pub const INBOX: &str = "inbox";
+pub const OUTBOX: &str = "outbox";
+
+// Which box a message belongs in, asked of the message itself: a sent message
+// carries the sent folder's id in parentFolderId, and nothing else does. The
+// alternative — comparing the sender to the signed-in account — gets a mail
+// copied to oneself wrong.
+//
+// Without a sent folder id to compare against (the lookup can fail, and it is
+// not worth failing a whole run over) everything reads as received, which is
+// where it would have gone before this existed.
+pub fn box_of(parent_folder_id: Option<&str>, sent_folder_id: Option<&str>) -> &'static str {
+    match (parent_folder_id, sent_folder_id) {
+        (Some(parent), Some(sent)) if parent == sent => OUTBOX,
+        _ => INBOX,
+    }
+}
+
 // The last ID_TAIL characters, or all of them if it is shorter.
 fn tail(id: &str) -> String {
     let chars: Vec<char> = id.chars().collect();
@@ -45,7 +68,7 @@ impl Archive {
 
     // Local time, not UTC: the day a mail belongs to is the day it arrived
     // where the reader was.
-    pub fn path_for(&self, received: DateTime<Local>, id: &str, subject: &str) -> PathBuf {
+    pub fn path_for(&self, which: &str, received: DateTime<Local>, id: &str, subject: &str) -> PathBuf {
         let name = format!(
             "{}-{}-{}.md",
             received.format("%Y-%m-%dT%H%M"),
@@ -53,14 +76,22 @@ impl Archive {
             slug(subject)
         );
         self.root
+            .join(which)
             .join(received.format("%Y").to_string())
             .join(received.format("%m").to_string())
             .join(received.format("%d").to_string())
             .join(name)
     }
 
-    pub fn write(&self, received: DateTime<Local>, id: &str, subject: &str, body: &str) -> Result<PathBuf, Error> {
-        let file = self.path_for(received, id, subject);
+    pub fn write(
+        &self,
+        which: &str,
+        received: DateTime<Local>,
+        id: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<PathBuf, Error> {
+        let file = self.path_for(which, received, id, subject);
         if let Some(dir) = file.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
         }
@@ -69,11 +100,28 @@ impl Archive {
         Ok(file)
     }
 
-    // The oldest message in the archive, as a path. Four directory reads rather
-    // than a walk of everything: at each level the smallest name is the one to
-    // descend into, which only holds because the levels are year, month and day.
+    // The oldest message in the archive, across both boxes — which is the date
+    // the next chunk should end at, and they are pulled together so they move
+    // together.
     pub fn oldest(&self) -> Result<Option<PathBuf>, Error> {
-        let mut at = self.root.clone();
+        let mut best: Option<(String, PathBuf)> = None;
+        for which in [INBOX, OUTBOX] {
+            let Some(path) = self.oldest_in(&self.root.join(which))? else { continue };
+            // By file name, not by path: the name starts with the timestamp, so
+            // it orders across boxes as well as within one.
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if best.as_ref().is_none_or(|(best, _)| name < *best) {
+                best = Some((name, path));
+            }
+        }
+        Ok(best.map(|(_, path)| path))
+    }
+
+    // Four directory reads rather than a walk of everything: at each level the
+    // smallest name is the one to descend into, which only holds because the
+    // levels are year, month and day.
+    fn oldest_in(&self, box_root: &Path) -> Result<Option<PathBuf>, Error> {
+        let mut at = box_root.to_path_buf();
         for _ in 0..3 {
             match smallest(&at, true)? {
                 Some(next) => at = next,
@@ -149,11 +197,11 @@ mod tests {
     #[test]
     fn the_path_carries_the_date_the_id_and_the_subject() {
         let archive = Archive::new("/tmp/mail");
-        let path = archive.path_for(at(2026, 10, 2, 14, 22), "AAkALgAAAAAAHzK7qega", "Rechnung September");
+        let path = archive.path_for(INBOX, at(2026, 10, 2, 14, 22), "AAkALgAAAAAAHzK7qega", "Rechnung September");
 
         assert_eq!(
             path.to_str().unwrap(),
-            "/tmp/mail/2026/10/02/2026-10-02T1422-hzk7qega-rechnung-september.md"
+            "/tmp/mail/inbox/2026/10/02/2026-10-02T1422-hzk7qega-rechnung-september.md"
         );
     }
 
@@ -161,8 +209,8 @@ mod tests {
     #[test]
     fn the_path_is_the_same_every_time_for_the_same_message() {
         let archive = Archive::new("/tmp/mail");
-        let first = archive.path_for(at(2026, 10, 2, 14, 22), "ABC12345xyz", "Betreff");
-        let second = archive.path_for(at(2026, 10, 2, 14, 22), "ABC12345xyz", "Betreff");
+        let first = archive.path_for(INBOX, at(2026, 10, 2, 14, 22), "ABC12345xyz", "Betreff");
+        let second = archive.path_for(INBOX, at(2026, 10, 2, 14, 22), "ABC12345xyz", "Betreff");
         assert_eq!(first, second);
     }
 
@@ -173,8 +221,8 @@ mod tests {
     fn two_messages_in_one_minute_do_not_share_a_path() {
         let archive = Archive::new("/tmp/mail");
         let common = "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AL-bijhXnv0eWUSrM0LHx_QAH";
-        let a = archive.path_for(at(2026, 10, 2, 14, 22), &format!("{common}zK7qegAA"), "Gleicher Betreff");
-        let b = archive.path_for(at(2026, 10, 2, 14, 22), &format!("{common}zLDYdAAA"), "Gleicher Betreff");
+        let a = archive.path_for(INBOX, at(2026, 10, 2, 14, 22), &format!("{common}zK7qegAA"), "Gleicher Betreff");
+        let b = archive.path_for(INBOX, at(2026, 10, 2, 14, 22), &format!("{common}zLDYdAAA"), "Gleicher Betreff");
         assert_ne!(a, b, "ids that share their first 60 characters must still differ");
     }
 
@@ -211,11 +259,38 @@ mod tests {
         // Deliberately written newest first, so order of creation can't be what
         // the answer depends on.
         for (y, m, d, h) in [(2026, 10, 2, 14), (2026, 10, 1, 9), (2025, 12, 31, 23), (2026, 1, 5, 8)] {
-            archive.write(at(y, m, d, h, 0), "ID123456", "Betreff", "body").unwrap();
+            archive.write(INBOX, at(y, m, d, h, 0), "ID123456", "Betreff", "body").unwrap();
         }
 
         let oldest = archive.oldest().unwrap().expect("something is in there");
-        assert!(oldest.ends_with("2025/12/31/2025-12-31T2300-id123456-betreff.md"), "got: {}", oldest.display());
+        assert!(oldest.ends_with("inbox/2025/12/31/2025-12-31T2300-id123456-betreff.md"), "got: {}", oldest.display());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_message_knows_its_own_box() {
+        assert_eq!(box_of(Some("SENT"), Some("SENT")), OUTBOX);
+        assert_eq!(box_of(Some("OTHER"), Some("SENT")), INBOX);
+        // No sent folder to compare against, or no parent at all: received,
+        // which is where everything went before boxes existed.
+        assert_eq!(box_of(Some("SENT"), None), INBOX);
+        assert_eq!(box_of(None, Some("SENT")), INBOX);
+    }
+
+    // The two boxes are pulled together, so the archive reaches back as far as
+    // the older of them.
+    #[test]
+    fn the_oldest_is_the_oldest_of_both_boxes() {
+        let root = std::env::temp_dir().join(format!("mymail-boxes-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let archive = Archive::new(root.to_str().unwrap());
+
+        archive.write(INBOX, at(2026, 3, 2, 9, 0), "IDAAAAAA", "Empfangen", "body").unwrap();
+        archive.write(OUTBOX, at(2026, 1, 5, 8, 0), "IDBBBBBB", "Gesendet", "body").unwrap();
+
+        let oldest = archive.oldest().unwrap().expect("something is in there");
+        assert!(oldest.ends_with("outbox/2026/01/05/2026-01-05T0800-idbbbbbb-gesendet.md"), "got: {}", oldest.display());
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -232,12 +307,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("mymail-stray-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         let archive = Archive::new(root.to_str().unwrap());
-        archive.write(at(2026, 5, 4, 12, 0), "ID123456", "Betreff", "body").unwrap();
-        std::fs::write(root.join("README.md"), "not a message").unwrap();
-        std::fs::create_dir_all(root.join("notes")).unwrap();
+        archive.write(INBOX, at(2026, 5, 4, 12, 0), "ID123456", "Betreff", "body").unwrap();
+        std::fs::write(root.join(INBOX).join("README.md"), "not a message").unwrap();
+        std::fs::create_dir_all(root.join(INBOX).join("notes")).unwrap();
 
         let oldest = archive.oldest().unwrap().expect("the real message");
-        assert!(oldest.ends_with("2026/05/04/2026-05-04T1200-id123456-betreff.md"), "got: {}", oldest.display());
+        assert!(oldest.ends_with("inbox/2026/05/04/2026-05-04T1200-id123456-betreff.md"), "got: {}", oldest.display());
 
         std::fs::remove_dir_all(&root).ok();
     }

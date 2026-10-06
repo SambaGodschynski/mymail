@@ -90,13 +90,29 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 
 #[tokio::main]
 async fn main() {
+    let result = run().await;
+
+    // Flushed by hand, because the exits below don't do it.
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+
     // Reported here rather than by returning Err from main: main's own error
     // reporting uses Debug formatting, which renders a message with quotes and
     // any usage text with literal escapes.
-    if let Err(e) = run().await {
+    if let Err(e) = result {
         eprintln!("mymail: {e}");
         std::process::exit(1);
     }
+
+    // Exiting rather than returning. Returning drops the tokio runtime, and
+    // dropping it waits for blocking tasks to finish — DNS resolution is one of
+    // those, started by spawn_blocking and not cancellable. So a request that
+    // timed out can leave getaddrinfo running until the system resolver gives
+    // up, and the program sits there after it has done its work and said so,
+    // which is indistinguishable from having hung. Nothing here needs a
+    // destructor: files are written and closed as they go, and there is no
+    // database to close.
+    std::process::exit(0);
 }
 
 async fn run() -> Result<(), Error> {

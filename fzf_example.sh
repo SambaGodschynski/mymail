@@ -8,6 +8,7 @@
 #     x_mail_once 7     # the same without waiting for more
 #     x_mail_events 7   # the next 7 days in the calendar
 #     x_mail_open <id>  # straight to one message
+#     x_mail_update_token <token>   # put a fresh token in the config
 #
 # Works in bash and zsh. Needs fzf and nvim on PATH.
 #
@@ -105,6 +106,64 @@ x_mail_once()
   rc=$?
   (( rc == 130 )) && return 0
   return $rc
+}
+
+# Puts a fresh token into the config, replacing whatever MAIL_TOKEN held and
+# leaving the rest of the file alone — a browser token lasts a day at most, so
+# this is a thing one does often.
+#
+# A token copied out of an "Authorization: Bearer …" header brings the scheme
+# with it; stripped here as well as by mymail itself, because the error it
+# causes otherwise reads as an expired token rather than a malformed one.
+x_mail_update_token()
+{
+  local token tmp check
+  if (( $# != 1 )); then
+    echo 'usage: x_mail_update_token <token>' >&2
+    return 2
+  fi
+  token=${1#Bearer }
+  token=${token#bearer }
+  token=${token//[[:space:]]/}
+  if [[ -z $token ]]; then
+    echo 'x_mail_update_token: that is an empty token' >&2
+    return 2
+  fi
+  if [[ ! -f $X_MAIL_ENV ]]; then
+    echo "x_mail_update_token: no config at $X_MAIL_ENV" >&2
+    return 1
+  fi
+
+  # Written beside the config rather than in /tmp, so replacing it is one atomic
+  # rename on the same filesystem: an interruption can't leave a config without
+  # a token in it.
+  tmp=$(mktemp "$X_MAIL_ENV.XXXXXX") || return 1
+  chmod 600 "$tmp"
+  # The token goes through the environment, not through the awk program text:
+  # it is base64 and carries characters awk would otherwise read as syntax.
+  if ! MYMAIL_NEW_TOKEN=$token awk '
+        /^MAIL_TOKEN=/ && !done { print "MAIL_TOKEN=" ENVIRON["MYMAIL_NEW_TOKEN"]; done = 1; next }
+        { print }
+        END { if (!done) print "MAIL_TOKEN=" ENVIRON["MYMAIL_NEW_TOKEN"] }
+      ' "$X_MAIL_ENV" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$X_MAIL_ENV" || { rm -f "$tmp"; return 1; }
+
+  # Tried once rather than taken on trust: the whole point of pasting a token is
+  # that the old one stopped working, and finding out now beats finding out in
+  # the middle of a sync.
+  check=$(mktemp) || return 0
+  if "$X_MAIL_BIN" --env "$X_MAIL_ENV" 1 --once > /dev/null 2>"$check"; then
+    echo "token updated in $X_MAIL_ENV"
+    rm -f "$check"
+    return 0
+  fi
+  echo "token updated, but it was refused:" >&2
+  cat "$check" >&2
+  rm -f "$check"
+  return 1
 }
 
 # The calendar reads as a whole rather than being searched one line at a time,

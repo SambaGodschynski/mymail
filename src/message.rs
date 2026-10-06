@@ -5,7 +5,8 @@ use crate::api::{self, Session};
 use crate::config::Config;
 use crate::{BOLD, DIM, Error, Opts, RESET};
 
-const SELECT: &str = "subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,body";
+const SELECT: &str =
+    "subject,from,toRecipients,ccRecipients,receivedDateTime,hasAttachments,body,parentFolderId";
 const WIDTH: usize = 74;
 // Long enough to see who was in the conversation, short enough that a mail to
 // the whole company doesn't push the message off the screen.
@@ -22,7 +23,9 @@ pub async fn show(config: &Config, id: &str, opts: &Opts) -> Result<(), Error> {
         .map_err(|e| crate::config::explain(e, &config.token, "Mail.Read"))?;
 
     if let Some(archive) = &opts.mirror {
-        let file = archive.write(received_at(&message), id, subject(&message), &document(&message, false)?)?;
+        let sent = sent_folder_id(&session, opts).await;
+        let which = crate::archive::box_of(parent_folder(&message), sent.as_deref());
+        let file = archive.write(which, received_at(&message), id, subject(&message), &document(&message, false)?)?;
         eprintln!("mirrored {}", file.display());
     }
     outln!("{}", document(&message, crate::color_enabled())?);
@@ -43,15 +46,43 @@ pub struct Rendered {
     pub received: DateTime<Local>,
     pub subject: String,
     pub document: String,
+    pub which: &'static str,
 }
 
-pub async fn render(session: &Session, id: &str, opts: &Opts) -> Result<Rendered, Error> {
+pub async fn render(
+    session: &Session,
+    id: &str,
+    sent_folder_id: Option<&str>,
+    opts: &Opts,
+) -> Result<Rendered, Error> {
     let message = fetch(session, id, opts).await?;
     Ok(Rendered {
         received: received_at(&message),
         subject: subject(&message).to_string(),
         document: document(&message, false)?,
+        which: crate::archive::box_of(parent_folder(&message), sent_folder_id),
     })
+}
+
+fn parent_folder(message: &Value) -> Option<&str> {
+    message.get("parentFolderId").and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+// The sent folder's id, asked for once so every message can say whether it is
+// one of its own. Not fatal if it cannot be had: everything then reads as
+// received, which is where it all went before boxes existed.
+pub async fn sent_folder_id(session: &Session, opts: &Opts) -> Option<String> {
+    let url = "https://graph.microsoft.com/v1.0/me/mailFolders/sentitems?$select=id";
+    if opts.verbose {
+        eprintln!("GET {url}");
+    }
+    match session.get(url).await {
+        Ok(folder) => folder.get("id").and_then(Value::as_str).map(str::to_string),
+        Err(e) => {
+            eprintln!("could not tell which folder is Sent ({e}) — filing everything as received");
+            None
+        }
+    }
 }
 
 fn subject(message: &Value) -> &str {
