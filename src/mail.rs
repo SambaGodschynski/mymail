@@ -73,9 +73,15 @@ pub async fn run(
     // endpoint of its own, so this asks. The interval is configuration rather
     // than a constant because the right answer depends on the mailbox: see the
     // README.
-    if opts.verbose {
-        eprintln!("following {} every {} (ctrl-c to stop)", config.folder, describe_std(config.poll));
-    }
+    // Said every time, not only under --verbose: the backfill ends, the polling
+    // makes no noise, and silence after the last line is indistinguishable from
+    // a program that has hung. It goes to stderr, so a pipe into fzf is
+    // unaffected.
+    eprintln!(
+        "following {} every {} — ctrl-c to stop, or --once to load and exit",
+        config.folder,
+        describe_std(config.poll)
+    );
     loop {
         let interrupted = tokio::select! {
             _ = tokio::signal::ctrl_c() => true,

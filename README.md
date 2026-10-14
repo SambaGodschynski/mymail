@@ -79,6 +79,15 @@ mymail --help             # all flags
 Oldest first, so the backfill reads in the order things happened and new mail
 arrives at the bottom. `*` marks unread. Ctrl-C stops the follow.
 
+**Without `--once` it keeps running.** The window is loaded, and then it follows
+— polling quietly for new mail until stopped. It says so when it gets there,
+because the alternative is a program that has gone silent and looks like it has
+hung. For loading an archive and getting the prompt back, `--once` is the flag:
+
+```bash
+mymail 5d --mirror ~/mail --once
+```
+
 ### show-events
 
 ```
