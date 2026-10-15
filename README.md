@@ -271,11 +271,14 @@ an interruption can't leave a config without a token, and the new token is tried
 once before the function returns — finding out now beats finding out in the
 middle of a sync.
 
-Sourced rather than run, works in bash and zsh, needs `fzf` and `nvim`. Both
-ways in — the picker's enter and `x_mail_open` — pass `--mirror`, so reading a
-message archives it. Their stderr goes to a file of its own and is folded into
-what nvim shows only when the render failed, so the "mirrored …" line doesn't
-become the first line of every mail.
+Sourced rather than run, works in bash and zsh, needs `fzf` and `nvim`.
+
+The **list** runs with `--mirror`, so everything it shows is on disk by the time
+it can be opened: the window it loaded, and everything that arrives while it
+follows. Opening a message therefore writes nothing — it only renders what is
+already there into a temporary file for nvim. Its stderr goes to a file of its
+own and is folded into what nvim shows only when the render failed, so a refusal
+is read rather than flashing past on a redraw.
 
 `x_mail` streams into fzf and keeps streaming, so new mail appears in the list
 as it arrives. The list comes from `FZF_DEFAULT_COMMAND` rather than a pipe, so

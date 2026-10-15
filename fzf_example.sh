@@ -37,6 +37,10 @@ X_MAIL_MIRROR=${X_MAIL_MIRROR:-$HOME/mails}
 #
 # stderr goes into the file too, so a refusal — an expired token, most likely —
 # is read in nvim rather than flashing past on a redraw.
+#
+# The list itself runs with --mirror, so everything it shows — the window it
+# loaded and everything that arrives while it follows — is on disk by the time
+# it can be opened. Opening one therefore writes nothing.
 _x_mail_fzf()
 {
   local header=$1
@@ -47,7 +51,7 @@ _x_mail_fzf()
   fzf --ansi --no-sort --tac --style minimal --wrap=word --with-nth=2.. \
       --header "$header" --header-border=top "$@" \
       --bind "enter:execute(f=\$(mktemp --suffix=.md -t mymail-XXXXXX); \
-\"$X_MAIL_BIN\" --env \"$X_MAIL_ENV\" --mirror=\"$X_MAIL_MIRROR\" show-message {1} --no-color \
+\"$X_MAIL_BIN\" --env \"$X_MAIL_ENV\" show-message {1} --no-color \
 > \$f 2>\$f.err || cat \$f.err >> \$f; nvim -R \$f; rm -f \$f \$f.err)"
 }
 
@@ -61,10 +65,12 @@ x_mail_open()
     return 2
   fi
   file=$(mktemp --suffix=.md -t mymail-XXXXXX) || return 1
-  # stderr to a file of its own, folded in only when the render failed: on
-  # success it carries the "mirrored …" line, which would otherwise be the first
-  # line of the mail nvim shows.
-  "$X_MAIL_BIN" --env "$X_MAIL_ENV" --mirror="$X_MAIL_MIRROR" show-message "$1" --no-color \
+  # No --mirror here: the list a message was picked from archived it already,
+  # and opening one is not the moment to make a request that writes.
+  #
+  # stderr to a file of its own, folded in only when the render failed, so a
+  # refusal is read in nvim rather than flashing past on a redraw.
+  "$X_MAIL_BIN" --env "$X_MAIL_ENV" show-message "$1" --no-color \
     > "$file" 2>"$file.err"
   rc=$?
   (( rc != 0 )) && cat "$file.err" >> "$file"
@@ -86,7 +92,7 @@ x_mail_open()
 x_mail()
 {
   local rc cmd
-  cmd="\"$X_MAIL_BIN\" --env \"$X_MAIL_ENV\" ${1:-7} --ids"
+  cmd="\"$X_MAIL_BIN\" --env \"$X_MAIL_ENV\" --mirror=\"$X_MAIL_MIRROR\" ${1:-7} --ids"
   FZF_DEFAULT_COMMAND=$cmd _x_mail_fzf '✉ · ctrl-r: reload' \
     --bind "ctrl-r:reload($cmd)"
   # Esc is how you leave a picker, not a failure — but fzf reports it as 130,
@@ -100,7 +106,7 @@ x_mail()
 x_mail_once()
 {
   local rc cmd
-  cmd="\"$X_MAIL_BIN\" --env \"$X_MAIL_ENV\" ${1:-7} --once --ids"
+  cmd="\"$X_MAIL_BIN\" --env \"$X_MAIL_ENV\" --mirror=\"$X_MAIL_MIRROR\" ${1:-7} --once --ids"
   FZF_DEFAULT_COMMAND=$cmd _x_mail_fzf 'mail — enter: read · ctrl-r: reload · esc: quit' \
     --bind "ctrl-r:reload($cmd)"
   rc=$?
