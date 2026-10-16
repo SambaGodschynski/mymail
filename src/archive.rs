@@ -83,6 +83,14 @@ impl Archive {
             .join(name)
     }
 
+    // Whether this message is already on disk. The path is a function of the
+    // message, and the listing carries everything it is made of — so this is
+    // answerable without fetching the body, which is the whole point: a reload
+    // then costs one listing call instead of one call per message.
+    pub fn holds(&self, which: &str, received: DateTime<Local>, id: &str, subject: &str) -> bool {
+        self.path_for(which, received, id, subject).is_file()
+    }
+
     pub fn write(
         &self,
         which: &str,
@@ -96,7 +104,16 @@ impl Archive {
             std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
         }
         let body = if body.ends_with('\n') { body.to_string() } else { format!("{body}\n") };
-        std::fs::write(&file, body).map_err(|e| format!("could not write {}: {e}", file.display()))?;
+        // Written beside the target and renamed into place, so the file either
+        // isn't there or is complete. That matters now that its existence is
+        // what says a message needs no fetching: a half-written file from an
+        // interrupted run would otherwise be skipped for ever.
+        let temp = file.with_extension(format!("md.tmp{}", std::process::id()));
+        std::fs::write(&temp, body).map_err(|e| format!("could not write {}: {e}", temp.display()))?;
+        std::fs::rename(&temp, &file).map_err(|e| {
+            let _ = std::fs::remove_file(&temp);
+            format!("could not replace {}: {e}", file.display())
+        })?;
         Ok(file)
     }
 
@@ -264,6 +281,43 @@ mod tests {
 
         let oldest = archive.oldest().unwrap().expect("something is in there");
         assert!(oldest.ends_with("inbox/2025/12/31/2025-12-31T2300-id123456-betreff.md"), "got: {}", oldest.display());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_written_message_is_then_held() {
+        let root = std::env::temp_dir().join(format!("mymail-holds-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let archive = Archive::new(root.to_str().unwrap());
+        let when = at(2026, 10, 2, 14, 22);
+
+        assert!(!archive.holds(INBOX, when, "IDAAAAAA", "Betreff"));
+        archive.write(INBOX, when, "IDAAAAAA", "Betreff", "body").unwrap();
+        assert!(archive.holds(INBOX, when, "IDAAAAAA", "Betreff"));
+        // A different message in the same minute is not held by it.
+        assert!(!archive.holds(INBOX, when, "IDBBBBBB", "Betreff"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // Existence is taken as "complete", so writing must not leave a partial
+    // file behind to be skipped for ever.
+    #[test]
+    fn writing_leaves_no_temporary_file_behind() {
+        let root = std::env::temp_dir().join(format!("mymail-atomic-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let archive = Archive::new(root.to_str().unwrap());
+        let file = archive.write(INBOX, at(2026, 10, 2, 14, 22), "IDAAAAAA", "Betreff", "body").unwrap();
+
+        let dir = file.parent().unwrap();
+        let strays: Vec<_> = std::fs::read_dir(dir).unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "left behind: {strays:?}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "body\n");
 
         std::fs::remove_dir_all(&root).ok();
     }

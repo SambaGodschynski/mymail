@@ -10,7 +10,10 @@ use crate::{CYAN, DIM, Error, Opts, RESET, YELLOW, c};
 
 // Only what a line needs. Graph returns the whole message otherwise, body and
 // all, which for a week of mail is a lot of response to read and throw away.
-const SELECT: &str = "id,receivedDateTime,subject,from,isRead";
+// parentFolderId is here so the archive path can be worked out from the listing
+// alone — which is what lets an already-mirrored message be recognised without
+// fetching it.
+const SELECT: &str = "id,receivedDateTime,subject,from,isRead,parentFolderId";
 const PAGE: u32 = 50;
 // Enough that a message can't be printed twice across a few polls, bounded so a
 // long-running follow doesn't grow without end.
@@ -22,6 +25,7 @@ struct Message {
     subject: String,
     from: String,
     unread: bool,
+    parent_folder: Option<String>,
 }
 
 pub async fn run(
@@ -140,22 +144,7 @@ async fn print_new(
         // The listing carries no body, so each mirrored message is one more
         // request — which is why this only happens when a mirror was asked for.
         if let Some(archive) = &opts.mirror {
-            match crate::message::render(session, &message.id, sent_folder, opts).await {
-                Ok(rendered) => {
-                    let file = archive.write(
-                        rendered.which,
-                        rendered.received,
-                        &message.id,
-                        &rendered.subject,
-                        &rendered.document,
-                    )?;
-                    if opts.verbose {
-                        eprintln!("mirrored {}", file.display());
-                    }
-                }
-                // One unreadable message is no reason to abandon a long window.
-                Err(e) => eprintln!("could not mirror {}: {e}", message.id),
-            }
+            mirror_one(session, archive, &message, sent_folder, opts).await;
         }
     }
 
@@ -166,6 +155,53 @@ async fn print_new(
         seen.clear();
     }
     Ok(printed)
+}
+
+// Archives one message, unless it is there already.
+//
+// The path is a function of the message, and the listing carries everything it
+// is made of, so a message already on disk costs nothing at all — no request,
+// no write. That is what makes a reload cheap: it re-lists, finds everything
+// present, and fetches only what is genuinely new.
+//
+// Returns whether anything was written.
+async fn mirror_one(
+    session: &Session,
+    archive: &crate::archive::Archive,
+    message: &Message,
+    sent_folder: Option<&str>,
+    opts: &Opts,
+) -> bool {
+    let which = crate::archive::box_of(message.parent_folder.as_deref(), sent_folder);
+    let received = message.received.with_timezone(&Local);
+    if archive.holds(which, received, &message.id, &message.subject) {
+        return false;
+    }
+    match crate::message::render(session, &message.id, sent_folder, opts).await {
+        Ok(rendered) => match archive.write(
+            rendered.which,
+            rendered.received,
+            &message.id,
+            &rendered.subject,
+            &rendered.document,
+        ) {
+            Ok(file) => {
+                if opts.verbose {
+                    eprintln!("mirrored {}", file.display());
+                }
+                true
+            }
+            Err(e) => {
+                eprintln!("could not write {}: {e}", message.id);
+                false
+            }
+        },
+        // One unreadable message is no reason to abandon a long window.
+        Err(e) => {
+            eprintln!("could not mirror {}: {e}", message.id);
+            false
+        }
+    }
 }
 
 // The sent folder, archived but not shown. Its own cursor and its own seen-set,
@@ -190,16 +226,8 @@ async fn mirror_sent(
         if message.received > *since {
             *since = message.received;
         }
-        match crate::message::render(session, &message.id, sent_folder, opts).await {
-            Ok(rendered) => {
-                let file =
-                    archive.write(rendered.which, rendered.received, &message.id, &rendered.subject, &rendered.document)?;
-                written += 1;
-                if opts.verbose {
-                    eprintln!("mirrored {}", file.display());
-                }
-            }
-            Err(e) => eprintln!("could not mirror {}: {e}", message.id),
+        if mirror_one(session, archive, &message, sent_folder, opts).await {
+            written += 1;
         }
     }
     if seen.len() > REMEMBER {
@@ -252,14 +280,19 @@ fn message_from(v: &Value) -> Option<Message> {
     Some(Message {
         id: id.to_string(),
         received,
+        // Trimmed, so this agrees character for character with what the
+        // renderer uses: the two have to produce the same archive path, or an
+        // already-mirrored message would not be recognised as one.
         subject: v
             .get("subject")
             .and_then(Value::as_str)
-            .filter(|s| !s.trim().is_empty())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .unwrap_or("(no subject)")
             .to_string(),
         from,
         unread: v.get("isRead").and_then(Value::as_bool) == Some(false),
+        parent_folder: v.get("parentFolderId").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
     })
 }
 

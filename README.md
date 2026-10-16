@@ -159,9 +159,19 @@ while the last six already tell all 92 apart. That makes the path a function of
 the message, so opening the same mail twice rewrites one file instead of making
 a second.
 
-**Write-only, and it never deletes.** The listing carries no body, so each
-mirrored message is one more request — which is why mirroring is opt-in rather
-than something the listing does anyway.
+**A message already on disk costs nothing.** The path is a function of the
+message, and the listing carries everything it is made of — the time, the id and
+the subject — so a mirrored message is recognised without being fetched. Only
+what is genuinely new costs a request. Measured over a 30-day window that was
+already mirrored: 214 requests and 29 seconds before, **6 requests and 1 second**
+after; deleting one file from that window makes the next run fetch exactly that
+one.
+
+Files are written beside the target and renamed into place, so one either isn't
+there or is complete — which matters when its existence is what says a message
+needs no fetching.
+
+**Write-only, and it never deletes.**
 
 ### Reaching further back
 
@@ -275,7 +285,9 @@ Sourced rather than run, works in bash and zsh, needs `fzf` and `nvim`.
 
 The **list** runs with `--mirror`, so everything it shows is on disk by the time
 it can be opened: the window it loaded, and everything that arrives while it
-follows. Opening a message therefore writes nothing — it only renders what is
+follows. `ctrl-r` reloads with the same command, which is cheap because the
+archive already holds the window — it re-lists and fetches only what has arrived
+since. Opening a message therefore writes nothing — it only renders what is
 already there into a temporary file for nvim. Its stderr goes to a file of its
 own and is folded into what nvim shows only when the render failed, so a refusal
 is read rather than flashing past on a redraw.
