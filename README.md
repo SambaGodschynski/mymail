@@ -88,7 +88,7 @@ hung. For loading an archive and getting the prompt back, `--once` is the flag:
 mymail 5d --mirror ~/mail --once
 ```
 
-### show-events
+### `show-events <days>`
 
 ```
 [29.09.26 09:00-09:30]   Daily Standup  (Microsoft Teams)
@@ -101,22 +101,22 @@ falls in the window. From now rather than from midnight — "the next N days" is
 forward-looking, and a meeting that finished this morning isn't what's being
 asked about. `!` marks a cancelled occurrence, which is shown rather than hidden.
 
-### show-message &lt;id&gt;
+### `show-message <id>`
 
 ```
 --------------------------------------------------------------------------
 
-Action required: Prepare for Azure VM series retirements
+Rechnung September
 
-From       Microsoft Azure <azure-noreply@microsoft.com>
-To         Johannes Unger <unger@digitalklang.de>
+From       Erika Mustermann <erika@example.com>
+To         Max Mustermann <max@example.org>
 Received   29.09.26 08:38:14
 
 --------------------------------------------------------------------------
 
-# Prepare for Azure VM series retirements and price changes.
+# Rechnung September
 
-Microsoft continues to invest significantly in Azure infrastructure …
+anbei die Rechnung für September, zahlbar bis zum …
 
 ◼
 ```
@@ -134,8 +134,8 @@ Writes every message read as Markdown, so it can be grepped, diffed or opened
 later without asking Microsoft again:
 
 ```
-~/mail/inbox/2026/10/02/2026-10-02T1139-mcshfwaa-einladung-zur-coding-challenge.md
-~/mail/outbox/2026/10/02/2026-10-02T1510-zlezdaaa-re-coding-challenge.md
+~/mail/inbox/2026/10/02/2026-10-02T1139-a1b2c3d4-rechnung-september.md
+~/mail/outbox/2026/10/02/2026-10-02T1510-e5f6g7h8-re-rechnung-september.md
 ```
 
 Received and sent are kept apart at the top. **Sent mail is mirrored but not
@@ -181,7 +181,7 @@ next chunk should end:
 
 ```bash
 $ mymail --oldest --mirror ~/mail
-~/mail/inbox/2025/11/01/2025-11-01T1214-ruouxgaa-november-2025.md
+~/mail/inbox/2025/11/01/2025-11-01T1214-i9j0k1l2-angebot-november.md
 ```
 
 ### Identifying a message
