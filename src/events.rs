@@ -17,12 +17,31 @@ struct Event {
     cancelled: bool,
 }
 
-pub async fn run(config: &Config, window: TimeDelta, opts: &Opts) -> Result<(), Error> {
+/// Which way in time show-events looks, relative to now. The magnitude is a
+/// TimeDelta; the variant fixes the sign. "+N"/"N" -> Ahead, "-N" -> Back,
+/// "~N" -> Around (both sides).
+pub enum Span {
+    Ahead(TimeDelta),
+    Back(TimeDelta),
+    Around(TimeDelta),
+}
+
+pub async fn run(config: &Config, span: Span, opts: &Opts) -> Result<(), Error> {
     let session = Session::new(&api::client(), config.token.clone());
-    // From now rather than from midnight: "the next N days" is forward-looking,
-    // and a meeting that finished this morning isn't what's being asked about.
-    let from = Utc::now();
-    let url = calendar_url(from, from + window);
+    // Anchored at now, not midnight: "the next N days" is forward-looking and a
+    // meeting that finished this morning isn't it; the past window ends at now
+    // for the same reason. Each variant gives the window and the empty-note.
+    let now = Utc::now();
+    let (from, to, nothing) = match span {
+        Span::Ahead(d) => (now, now + d, format!("nothing in the next {}", describe(d))),
+        Span::Back(d) => (now - d, now, format!("nothing in the last {}", describe(d))),
+        Span::Around(d) => (
+            now - d,
+            now + d,
+            format!("nothing within {} either side of now", describe(d)),
+        ),
+    };
+    let url = calendar_url(from, to);
 
     let values = session
         .get_all(&url, opts.verbose)
@@ -36,7 +55,7 @@ pub async fn run(config: &Config, window: TimeDelta, opts: &Opts) -> Result<(), 
     events.sort_by_key(|e| e.start);
 
     if events.is_empty() {
-        eprintln!("nothing in the next {}", describe(window));
+        eprintln!("{nothing}");
         return Ok(());
     }
     for event in &events {

@@ -30,13 +30,14 @@ use chrono::{DateTime, Local, TimeDelta, TimeZone, Utc};
 
 const USAGE: &str = "\
 usage: mymail <days> [options]
-       mymail show-events <days> [options]
+       mymail show-events <span> [options]
        mymail show-message <id> [options]
        mymail --oldest --mirror <dir>
 
-  <days>                  how far back to load before following (e.g. 7), or
-                          for show-events, how far ahead to look. A suffixed
-                          value is taken as written: 2h, 30m, 3d.
+  <days>                  how far back to load before following (e.g. 7).
+                          A suffixed value is taken as written: 2h, 30m, 3d.
+  <span>                  for show-events: how far to look from now. N or +N
+                          ahead, -N back, ~N both ways (e.g. 7, -7, ~7, 2h).
 
 options:
       --once              print what was loaded and exit instead of following
@@ -156,6 +157,14 @@ async fn run() -> Result<(), Error> {
                 print!("{USAGE}");
                 return Ok(());
             }
+            // A leading-dash number (e.g. -7) is show-events' "past" span, not
+            // an unknown flag -> let it through as a positional word.
+            other
+                if other.starts_with('-')
+                    && other[1..].starts_with(|c: char| c.is_ascii_digit()) =>
+            {
+                words.push(other.to_string())
+            }
             // Silently ignoring an unknown flag hides typos: a mistyped --poll
             // would mean a run that looks fine and polls at the wrong rate.
             other if other.starts_with('-') => {
@@ -218,15 +227,35 @@ async fn run() -> Result<(), Error> {
             let id = argument.ok_or("show-message needs a message id — `mymail 7 --ids` prints them")?;
             message::show(&config, id, &opts).await
         }
-        other => {
-            let argument = argument.ok_or("show-events needs a number of days, e.g. mymail show-events 7")?;
+        "show-events" => {
+            let argument =
+                argument.ok_or("show-events needs a span, e.g. 7 (next 7d), -7 (past 7d) or ~7 (both)")?;
+            let span = parse_span(argument)
+                .ok_or_else(|| format!("{argument:?} is not a span — try 7, +7, -7 or ~7 (also 2h, 30m)"))?;
+            events::run(&config, span, &opts).await
+        }
+        _ => {
+            let argument = argument.ok_or("mymail needs a number of days, e.g. mymail 7")?;
             let window = parse_window(argument)
                 .ok_or_else(|| format!("{argument:?} is not a number of days — try 7, or 2h"))?;
-            match other {
-                "show-events" => events::run(&config, window, &opts).await,
-                _ => mail::run(&config, window, before, &opts).await,
-            }
+            mail::run(&config, window, before, &opts).await
         }
+    }
+}
+
+// show-events takes a SIGNED span: a bare or +N number looks ahead, -N looks
+// back, ~N looks both ways. The magnitude reuses parse_window (days, or a
+// suffixed duration like 2h), so only the direction prefix is handled here.
+fn parse_span(text: &str) -> Option<events::Span> {
+    let text = text.trim();
+    if let Some(rest) = text.strip_prefix('-') {
+        Some(events::Span::Back(parse_window(rest)?))
+    } else if let Some(rest) = text.strip_prefix('~') {
+        Some(events::Span::Around(parse_window(rest)?))
+    } else if let Some(rest) = text.strip_prefix('+') {
+        Some(events::Span::Ahead(parse_window(rest)?))
+    } else {
+        Some(events::Span::Ahead(parse_window(text)?))
     }
 }
 
